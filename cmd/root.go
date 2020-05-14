@@ -31,7 +31,7 @@ var cfgFile string
 var rootCmd = &cobra.Command{
 	Use:   "bitriseCLI",
 	Short: "bitriseでのビルドアナリティクスを算出します",
-	Long: `README → 
+	Long: `README → https://github.com/TechCafeFreedom/TODONE-BitriseCLI/blob/master/README.md
 BitriseAPIドキュメント → https://api-docs.bitrise.io/#/builds/build-list
 `,
 	// Uncomment the following line if your bare application
