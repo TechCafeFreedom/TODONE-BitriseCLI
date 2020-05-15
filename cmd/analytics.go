@@ -43,8 +43,9 @@ type Data struct {
 }
 
 type Paging struct {
-	TotalItemCount int `json:"total_item_count"`
-	PageItemLimit  int `json:"page_item_limit"`
+	TotalItemCount int    `json:"total_item_count"`
+	PageItemLimit  int    `json:"page_item_limit"`
+	Next           string `json:"next"`
 }
 
 // monthlyCmd represents the get command
@@ -71,22 +72,9 @@ var monthlyCmd = &cobra.Command{
 		twoMonthBefore.AfterDate = thisMonth.AfterDate.AddDate(0, -2, 0)
 		twoMonthBefore.BeforeDate = twoMonthBefore.AfterDate.AddDate(0, 1, -1).Add(23 * time.Hour).Add(59 * time.Minute).Add(59 * time.Second)
 
-		thisMonthRes := sendAPIRequest(thisMonth.BeforeDate, thisMonth.AfterDate)
-		lastMonthRes := sendAPIRequest(lastMonth.BeforeDate, lastMonth.AfterDate)
-		twoMonthBeforeRes := sendAPIRequest(twoMonthBefore.BeforeDate, twoMonthBefore.AfterDate)
-
-		var thisMonthData Response
-		var lastMonthData Response
-		var twoMonthBeforeData Response
-		if err := json.Unmarshal([]byte(thisMonthRes), &thisMonthData); err != nil {
-			log.Fatal(err)
-		}
-		if err := json.Unmarshal([]byte(lastMonthRes), &lastMonthData); err != nil {
-			log.Fatal(err)
-		}
-		if err := json.Unmarshal([]byte(twoMonthBeforeRes), &twoMonthBeforeData); err != nil {
-			log.Fatal(err)
-		}
+		thisMonthData := sendAPIRequest(thisMonth.BeforeDate, thisMonth.AfterDate)
+		lastMonthData := sendAPIRequest(lastMonth.BeforeDate, lastMonth.AfterDate)
+		twoMonthBeforeData := sendAPIRequest(twoMonthBefore.BeforeDate, twoMonthBefore.AfterDate)
 
 		monthlyAnalytics(thisMonthData)
 		monthlyAnalytics(lastMonthData)
@@ -94,20 +82,44 @@ var monthlyCmd = &cobra.Command{
 	},
 }
 
-func sendAPIRequest(beforeDate, afterDate time.Time) string {
-	rawURL := fmt.Sprintf("https://api.bitrise.io/v0.1/apps/%s/builds?before=%v&after=%v", os.Getenv("APP_SLUG_ID"), beforeDate.Unix(), afterDate.Unix())
-	u, _ := url.Parse(rawURL)
-	fmt.Printf("requestURL: %s\n\n", rawURL)
+func sendAPIRequest(beforeDate, afterDate time.Time) Response {
+	var monthlyData Response
+	for {
+		rawURL := fmt.Sprintf("https://api.bitrise.io/v0.1/apps/%s/builds?before=%v&after=%v&limit=10&next=%v", os.Getenv("APP_SLUG_ID"), beforeDate.Unix(), afterDate.Unix(), monthlyData.Paging.Next)
+		u, _ := url.Parse(rawURL)
 
-	params := &apiParams{
-		method: "GET",
-		url:    u,
-		header: os.Getenv("ACCESS_TOKEN"),
+		params := &apiParams{
+			method: "GET",
+			url:    u,
+			header: os.Getenv("ACCESS_TOKEN"),
+		}
+
+		ac := newAPIClient()
+		_, str, err := ac.doRequest(params)
+		if err != nil {
+			log.Fatalln(err)
+		}
+
+		var data Response
+		if err := json.Unmarshal([]byte(str), &data); err != nil {
+			log.Fatal(err)
+		}
+
+		if len(data.Data) == 0 {
+			return Response{}
+		}
+
+		for _, hoge := range data.Data {
+			monthlyData.Data = append(monthlyData.Data, hoge)
+		}
+		monthlyData.Paging = data.Paging
+
+		if monthlyData.Paging.Next == "" {
+			break
+		}
 	}
 
-	ac := newAPIClient()
-	_, str, _ := ac.doRequest(params)
-	return str
+	return monthlyData
 }
 
 func monthlyAnalytics(data Response) {
@@ -117,30 +129,40 @@ func monthlyAnalytics(data Response) {
 	}
 
 	var buildSumDuration time.Duration
-	var buildTimesStatusOK int
-	var buildTimesStatusError int
-	var buildTimesStatusAborted int
+	var buildTimesStatusOK, buildTimesStatusError, buildTimesStatusAborted, buildTotalDays int
+	var targetDate time.Time
 
-	fmt.Printf("--------- analytics:%v月 ---------\n", int(data.Data[0].StartedOnWorkerAt.Month()))
 	for _, buildData := range data.Data {
+		if targetDate.Truncate(time.Hour*24) != buildData.StartedOnWorkerAt.Truncate(time.Hour*24) && buildData.Status != 3 {
+			buildTotalDays++
+		}
+
 		switch buildData.Status {
 		case 1:
 			buildTimesStatusOK++
 			buildSumDuration += buildData.FinishedAt.Sub(buildData.StartedOnWorkerAt)
+			targetDate = buildData.StartedOnWorkerAt
 		case 2:
 			buildTimesStatusError++
 			buildSumDuration += buildData.FinishedAt.Sub(buildData.StartedOnWorkerAt)
+			targetDate = buildData.StartedOnWorkerAt
 		case 3:
 			buildTimesStatusAborted++
 		}
 	}
+	avarageTime := int(buildSumDuration) / (buildTimesStatusOK + buildTimesStatusError)
+	avarageBuildTimes := data.Paging.TotalItemCount / buildTotalDays
+	avarageDailyTime := int(buildSumDuration) / buildTotalDays
+
+	fmt.Printf("--------- analytics:%v月 ---------\n", int(data.Data[0].StartedOnWorkerAt.Month()))
 	fmt.Printf("ビルド回数(total)：%v回\n", data.Paging.TotalItemCount)
 	fmt.Printf("  > OK：%v回\n", buildTimesStatusOK)
 	fmt.Printf("  > Error：%v回\n", buildTimesStatusError)
 	fmt.Printf("  > Aborted：%v回\n", buildTimesStatusAborted)
 	fmt.Printf("ビルド合計時間：%v\n", buildSumDuration)
-	avarage := int(buildSumDuration) / (buildTimesStatusOK + buildTimesStatusError)
-	fmt.Printf("ビルド平均タイム：%v\n", time.Duration(avarage))
+	fmt.Printf("1回あたりのビルド平均タイム：%v\n\n", time.Duration(avarageTime))
+	fmt.Printf("1日あたりのビルド平均回数：%v\n", avarageBuildTimes)
+	fmt.Printf("1日あたりのビルド平均時間：%v\n", time.Duration(avarageDailyTime))
 	fmt.Printf("--------- analytics:%v月 ---------\n\n", int(data.Data[0].StartedOnWorkerAt.Month()))
 }
 
